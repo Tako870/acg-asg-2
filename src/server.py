@@ -43,7 +43,10 @@ def handle_client(conn, addr):
                     for sender, message in user_inbox:
                         conn.sendall(f"[FROM {sender}]: {message}\n".encode())
                     inboxes[username] = []  # Clear inbox after reading
-
+                    
+            elif decoded == "/quit":
+                break  # gracefully disconnect
+            
             else:
                 full_msg = f"{username}: {decoded}"
                 broadcast(full_msg.encode(), exclude=username)
