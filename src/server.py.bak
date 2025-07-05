@@ -7,13 +7,12 @@ inboxes = {}       # username -> list of (sender, message)
 def handle_client(conn, addr):
     try:
         username = conn.recv(1024).decode().strip()
-        
-        # Save connection and initialize inbox
         user_sockets[username] = conn
         inboxes[username] = []
 
+        clients[conn] = username
         print(f"[+] {username} connected from {addr}")
-        broadcast(f"{username} has joined the chat.".encode(), exclude=username)
+        broadcast(f"{username} has joined the chat.".encode(), conn)
         
         while True:
             msg = conn.recv(1024)
@@ -31,7 +30,7 @@ def handle_client(conn, addr):
                 if recipient not in user_sockets:
                     conn.sendall(f"User '{recipient}' not found.\n".encode())
                 else:
-                    # Store in recipient's inbox
+                    # Store in recipient inbox
                     inboxes[recipient].append((username, message))
                     user_sockets[recipient].sendall(f"[PRIVATE] {username}: {message}".encode())
 
@@ -42,26 +41,25 @@ def handle_client(conn, addr):
                 else:
                     for sender, message in user_inbox:
                         conn.sendall(f"[FROM {sender}]: {message}\n".encode())
-                    inboxes[username] = []  # Clear inbox after reading
+                    inboxes[username] = []  # Clear inbox after viewing
 
             else:
                 full_msg = f"{username}: {decoded}"
-                broadcast(full_msg.encode(), exclude=username)
+                broadcast(full_msg.encode(), conn)
 
     finally:
-        print(f"[-] {username} disconnected")
-        broadcast(f"{username} has left the chat.".encode(), exclude=username)
-        user_sockets.pop(username, None)
-        inboxes.pop(username, None)
+        print(f"[-] {clients.get(conn, 'Unknown')} disconnected")
+        broadcast(f"{clients.get(conn, 'Unknown')} has left the chat.".encode(), conn)
+        clients.pop(conn, None)
         conn.close()
 
-def broadcast(message, exclude=None):
-    for uname, client in user_sockets.items():
-        if uname != exclude:
+def broadcast(message, source_conn):
+    for client in clients:
+        if client != source_conn:
             try:
                 client.sendall(message)
             except:
-                pass  # Handle broken pipe silently for now
+                pass
 
 def start_server(host='0.0.0.0', port=12345):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
