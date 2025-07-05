@@ -1,7 +1,7 @@
 import socket
 import threading
 
-clients = {}  # {conn: username}
+clients = []  # {conn: username}
 user_sockets = {}  # username -> conn
 inboxes = {}       # username -> list of (sender, message)
 
