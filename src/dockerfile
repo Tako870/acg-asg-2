@@ -1,0 +1,14 @@
+# Use official Python base image
+FROM python:3.11-slim
+
+# Set work directory
+WORKDIR /app
+
+# Copy server code
+COPY server.py .
+
+# Expose the server port
+EXPOSE 12345
+
+# Run server.py
+CMD ["python", "server.py"]
