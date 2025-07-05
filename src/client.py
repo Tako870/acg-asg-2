@@ -27,8 +27,13 @@ def start_client(server_ip, port=12345):
         while True:
             msg = input("> ")
             sock.sendall(msg.encode())
+
+            if msg.strip() == "/quit":
+                print("[*] Disconnecting.")
+                break
+
     except KeyboardInterrupt:
-        print("\n[*] Disconnecting.")
+        print("\n[*] Disconnected via keyboard interrupt.")
     finally:
         sock.close()
 
