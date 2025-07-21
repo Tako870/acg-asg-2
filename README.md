@@ -4,7 +4,7 @@ This is a little chat server/client program for our crryptography assignment.
 ---
 1. Git clone the repo and cd into it
 2. Run `python3 client.py <chat server domain or IP>`
-3. When prompted, enter the usernamy by which you want to be known.
+3. When prompted, enter the username by which you want to be known.
 4. Start chatting!
 
 # Features
