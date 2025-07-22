@@ -1,4 +1,4 @@
-This is a little chat server/client program for our crryptography assignment.
+This is a little chat server/client program for our cryptography assignment.
 
 # Usage
 ---
