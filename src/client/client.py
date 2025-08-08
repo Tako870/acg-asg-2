@@ -4,6 +4,94 @@ import socket
 import threading
 # needed for command line arguments and printing messages
 import sys
+# Import our cryptographic functions
+from ciphermodule import generate_user_keypairs, encrypt_and_sign_for_user, decrypt_and_verify_received
+# For JSON handling and file operations
+import json
+import os
+
+# Global variables for cryptographic keys
+user_keys = None
+other_users_public_keys = {}  # username -> {'ecc_public': key, 'dsa_public': key}
+
+def load_or_generate_keys(username):
+    """Load existing keys or generate new ones for the user."""
+    global user_keys
+    
+    # Create users_keys directory if it doesn't exist
+    keys_dir = "users_keys"
+    os.makedirs(keys_dir, exist_ok=True)
+    
+    # Store keys in the users_keys folder
+    keys_file = os.path.join(keys_dir, f"{username}_keys.json")
+    
+    if os.path.exists(keys_file):
+        # Load user's existing keys
+        print(f"[*] Loading existing keys for {username}")
+        with open(keys_file, 'r') as f:
+            user_keys = json.load(f)
+    else:
+        # Generate new keys for the user
+        print(f"[*] Generating new cryptographic keys for {username}")
+        user_keys = generate_user_keypairs()
+        
+        # Save keys to file
+        with open(keys_file, 'w') as f:
+            json.dump(user_keys, f, indent=2)
+        print(f"[*] Keys saved to {keys_file}")
+
+def send_public_keys(sock, username):
+    """Send our public keys to the server for distribution."""
+    public_key_msg = {
+        'type': 'public_keys',
+        'username': username,
+        'ecc_public': user_keys['ecc_public'],
+        'dsa_public': user_keys['dsa_public']
+    }
+    sock.sendall(json.dumps(public_key_msg).encode())
+
+def handle_secure_message(payload):
+    """Handle incoming secure messages."""
+    try:
+        # Extract sender info
+        sender = payload.get('sender')
+        encrypted_data = payload.get('encrypted_data')
+        
+        # Get sender's public keys
+        if sender not in other_users_public_keys:
+            print(f"[!] No public keys for {sender}")
+            return
+        
+        sender_dsa_pub = other_users_public_keys[sender]['dsa_public']
+        
+        # Decrypt and verify
+        message, signature_valid, timestamp = decrypt_and_verify_received(
+            encrypted_data,
+            user_keys['ecc_private'],
+            sender_dsa_pub
+        )
+        
+        if message:
+            status = "✓ VERIFIED" if signature_valid else "✗ INVALID SIGNATURE"
+            print(f"\n[SECURE] {sender}: {message} [{status}]")
+        else:
+            print(f"\n[!] Failed to decrypt message from {sender}")
+            
+    except Exception as e:
+        print(f"\n[!] Error handling secure message: {e}")
+
+def handle_public_keys(payload):
+    """Handle incoming public key announcements."""
+    try:
+        username = payload['username']
+        if username != user_keys.get('username'):  # Don't store our own keys
+            other_users_public_keys[username] = {
+                'ecc_public': payload['ecc_public'],
+                'dsa_public': payload['dsa_public']
+            }
+            print(f"\n[*] Received public keys for {username}")
+    except Exception as e:
+        print(f"\n[!] Error handling public keys: {e}")
 
 # Function to get messages
 def receive_messages(sock):
@@ -15,9 +103,22 @@ def receive_messages(sock):
             # If no message is received, break the loop
             if not msg:
                 break
-            # Print the received message
-            sys.stdout.write("\r" + msg.decode() + "\n> ")
-            sys.stdout.flush()
+            
+            # Try to parse as JSON (for secure messages)
+            try:
+                data = json.loads(msg.decode())
+                message_type = data.get('type')
+                if message_type == 'secure_message':
+                    handle_secure_message(data)
+                elif message_type == 'public_keys':
+                    handle_public_keys(data)
+                else:
+                    sys.stdout.write("\r" + str(data) + "\n> ")
+                    sys.stdout.flush()
+            except json.JSONDecodeError:
+                # Regular text message
+                sys.stdout.write("\r" + msg.decode() + "\n> ")
+                sys.stdout.flush()
         except:
             break
 
@@ -33,6 +134,13 @@ def start_client(server_ip, port=12345):
     # Prompt for username and send it to the server
     username = input("Enter your username: ")
     sock.sendall(username.encode())
+    
+    # Load or generate cryptographic keys
+    load_or_generate_keys(username)
+    user_keys['username'] = username  # Store username with keys
+    
+    # Send our public keys to the server
+    send_public_keys(sock, username)
 
     # Start a thread to receive messages from the server
     # A thread is used to allow simultaneous sending and receiving of messages
@@ -43,26 +151,76 @@ def start_client(server_ip, port=12345):
     # Main loop to send messages to the server
     # This loop will run until the user decides to quit
     print("[*] You can start sending messages. Type '/quit' to exit.")
+    print("[*] Use '/secure <username> <message>' for encrypted messages.")
+    print("[*] Use '/keys' to see available public keys.")
     
     try:
         while True:
             msg = input("> ")
-            sock.sendall(msg.encode())
+            
+            # Handle secure messaging command
+            if msg.startswith("/secure "):
+                handle_secure_command(sock, msg, username)
+            # Handle keys listing command
+            elif msg.strip() == "/keys":
+                print(f"Available public keys: {list(other_users_public_keys.keys())}")
+            # Regular message or other commands
+            else:
+                sock.sendall(msg.encode())
 
-            # If the user types '/quit', break the loop and close the connection
-            if msg.strip() == "/quit":
-                print("[*] Disconnecting.")
-                break
+                # If the user types '/quit', break the loop and close the connection
+                if msg.strip() == "/quit":
+                    print("[*] Disconnecting.")
+                    break
 
     except KeyboardInterrupt:
         print("\n[*] Disconnected via keyboard interrupt.")
     finally:
         sock.close()
 
+def handle_secure_command(sock, msg, username):
+    """Handle /secure command for sending encrypted messages."""
+    try:
+        # Parse command: /secure <recipient> <message>
+        parts = msg.split(' ', 2)
+        if len(parts) < 3:
+            print("Usage: /secure <recipient> <message>")
+            return
+        
+        recipient = parts[1]
+        message = parts[2]
+        
+        # Check if we have recipient's public keys
+        if recipient not in other_users_public_keys:
+            print(f"No public keys available for {recipient}. They may not be online.")
+            return
+        
+        # Encrypt and sign the message
+        recipient_ecc_pub = other_users_public_keys[recipient]['ecc_public']
+        encrypted_package = encrypt_and_sign_for_user(
+            message,
+            recipient_ecc_pub,
+            user_keys['dsa_private']
+        )
+        
+        # Send secure message to server
+        secure_msg = {
+            'type': 'secure_message',
+            'sender': username,
+            'recipient': recipient,
+            'encrypted_data': encrypted_package
+        }
+        
+        sock.sendall(json.dumps(secure_msg).encode())
+        print(f"[*] Secure message sent to {recipient}")
+        
+    except Exception as e:
+        print(f"[!] Error sending secure message: {e}")
+
 if __name__ == "__main__":
-    # Usage: python3 client.py <server-domain-or-ip>
+    # Usage: python3 src/client/client.py <server-domain-or-ip>
     if len(sys.argv) != 2:
-        print("Usage: python3 client.py <server-domain-or-ip>")
+        print("Usage: python3 src/client/client.py <server-domain-or-ip>")
         sys.exit(1)
 
     # Get the server domain or IP from command line arguments
