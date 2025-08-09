@@ -7,11 +7,14 @@ Implements secure private messaging with:
 
 """
 
-from Crypto.PublicKey import ECC
-from Crypto.Cipher import AES
-from Crypto.Protocol.KDF import HKDF
-from Crypto.Hash import SHA256
-import base64
+from Crypto.PublicKey import ECC, DSA     # Key generation & management
+from Crypto.Cipher import AES             # Symmetric encryption  
+from Crypto.Protocol.KDF import HKDF      # Key derivation
+from Crypto.Hash import SHA256            # Hashing for signatures
+from Crypto.Signature import DSS          # Digital signature operations
+import base64                             # Binary data encoding
+import json                               # Data structure serialization
+import time                               # Timestamps
 
 # ============================================================
 # Permanent ECC Key Management
@@ -24,6 +27,7 @@ def generate_ecc_keypair():
     """
     key = ECC.generate(curve='P-256')
     return key.export_key(format='PEM'), key.public_key().export_key(format='PEM')
+    # PEM is a standard base64-encoded text format for keys
 
 
 def import_private_key(pem):
@@ -52,7 +56,7 @@ def derive_shared_key(my_private, peer_public):
     shared_point = my_private.d * peer_public.pointQ
     shared_secret = int(shared_point.x).to_bytes(32, 'big')
 
-    # HKDF to derive AES key
+    # HKDF to derive AES key (will always produce same value for same inputs)
     return HKDF(shared_secret, 32, b'', SHA256)
 
 # ============================================================
@@ -130,3 +134,192 @@ def decrypt_received(payload, my_priv_pem):
 
     # Decrypt
     return aes_decrypt(nonce, ciphertext, tag, aes_key)
+
+
+# ============================================================
+# DSA Digital Signatures 
+# ============================================================
+
+def generate_dsa_keypair():
+    """Generate DSA key pair (1024-bit for speed)."""
+    # Create a new DSA key with 1024-bit length (faster than 2048-bit)
+    key = DSA.generate(1024)
+    
+    # Export both private and public keys in PEM format (text-based)
+    private_pem = key.export_key(format='PEM')          # Private key for signing
+    public_pem = key.public_key().export_key(format='PEM')  # Public key for verification
+    
+    # Ensure they are strings, not bytes
+    if isinstance(private_pem, bytes):
+        private_pem = private_pem.decode('utf-8')
+    if isinstance(public_pem, bytes):
+        public_pem = public_pem.decode('utf-8')
+    
+    return private_pem, public_pem
+
+
+def sign_message(message, private_key_pem):
+    """Sign message with DSA private key."""
+    # Load the DSA private key from PEM string
+    private_key = DSA.import_key(private_key_pem)
+    
+    # Create SHA256 hash of the message (DSA signs hashes, not raw text)
+    hash_obj = SHA256.new(message.encode('utf-8'))
+    
+    # Create DSA signer using FIPS 186-3 standard
+    signer = DSS.new(private_key, 'fips-186-3')
+    
+    # Generate the digital signature
+    signature = signer.sign(hash_obj)
+    
+    # Return signature encoded in Base64 for easy transmission
+    return base64.b64encode(signature).decode('utf-8')
+
+
+def verify_signature(message, signature_b64, public_key_pem):
+    """Verify DSA signature."""
+    try:
+        # Load the DSA public key from PEM string
+        public_key = DSA.import_key(public_key_pem)
+        
+        # Decode the Base64 signature back to raw bytes
+        signature = base64.b64decode(signature_b64)
+        
+        # Create the same SHA256 hash of the original message
+        hash_obj = SHA256.new(message.encode('utf-8'))
+        
+        # Create DSA verifier using same FIPS 186-3 standard
+        verifier = DSS.new(public_key, 'fips-186-3')
+        
+        # Verify signature matches the hash
+        verifier.verify(hash_obj, signature)
+        
+        # If we reach here, signature is valid
+        return True
+    
+    except:
+        # Any exception means signature is invalid
+        return False
+
+# ============================================================
+# Combined Operations (Integration Functions)
+# ============================================================
+
+def encrypt_and_sign_for_user(message, recipient_ecc_pub_pem, sender_dsa_priv_pem):
+    """
+    Complete secure messaging: Sign with DSA + Encrypt with ECC DH + AES
+    
+    This combines all three assignment requirements:
+    ✓ AES for symmetric encryption
+    ✓ ECC DH for key exchange  
+    ✓ DSA for digital signatures
+    
+    Process:
+    1. Sign the original message with DSA private key
+    2. Create signed payload (message + signature + timestamp)
+    3. Encrypt signed payload using your existing encrypt_for_user()
+    """
+    # Step 1: Sign the original message
+    signature = sign_message(message, sender_dsa_priv_pem)
+    
+    # Step 2: Create signed payload with timestamp
+    signed_payload = {
+        'message': message,
+        'signature': signature,
+        'timestamp': time.time()
+    }
+    
+    # Step 3: Convert to JSON and encrypt using your existing function
+    signed_payload_json = json.dumps(signed_payload)
+    encrypted_package = encrypt_for_user(signed_payload_json, recipient_ecc_pub_pem)
+    
+    # Step 4: Mark as secure message
+    encrypted_package['type'] = 'secure_message'
+    
+    return encrypted_package
+
+def decrypt_and_verify_received(payload, recipient_ecc_priv_pem, sender_dsa_pub_pem):
+    """
+    Complete secure receiving: Decrypt with ECC DH + AES + Verify DSA signature
+    
+    Process:
+    1. Decrypt payload using your existing decrypt_received()
+    2. Parse the signed payload (JSON)
+    3. Verify the DSA signature
+    
+    Returns: (message, signature_valid, timestamp)
+    """
+    try:
+        # Step 1: Decrypt using your existing function
+        decrypted_json = decrypt_received(payload, recipient_ecc_priv_pem)
+        
+        # Step 2: Parse the signed payload. Taking the JSON string and converting it back to Python dictionary
+        signed_payload = json.loads(decrypted_json)
+        
+        # Step 3: Verify the DSA signature
+        is_signature_valid = verify_signature(
+            signed_payload['message'],
+            signed_payload['signature'],
+            sender_dsa_pub_pem
+        )
+        
+        # Step 4: Return results
+        return (
+            signed_payload['message'],
+            is_signature_valid,
+            signed_payload.get('timestamp')
+        )
+        
+    except Exception as e:
+        print(f"Decryption/verification error: {e}")
+        return None, False, None
+
+def generate_user_keypairs():
+    """
+    Generate both ECC and DSA key pairs for a user.
+    
+    Returns: Dictionary with all 4 keys needed for secure messaging
+    """
+    ecc_private, ecc_public = generate_ecc_keypair()
+    dsa_private, dsa_public = generate_dsa_keypair()
+    
+    return {
+        'ecc_private': ecc_private,
+        'ecc_public': ecc_public,
+        'dsa_private': dsa_private,
+        'dsa_public': dsa_public
+    }
+
+# ============================================================
+# Test Function for checking (not necessary, can delete later on)
+# ============================================================
+
+def test_complete_crypto():
+    """Test all crypto functions working together."""
+    # Generate keys
+    alice_keys = generate_user_keypairs()
+    bob_keys = generate_user_keypairs()
+    
+    # Alice sends secure message to Bob
+    message = "Secret meeting at 3pm!"
+    secure_msg = encrypt_and_sign_for_user(
+        message,
+        bob_keys['ecc_public'],
+        alice_keys['dsa_private']
+    )
+    
+    # Bob receives and verifies
+    decrypted, signature_valid, timestamp = decrypt_and_verify_received(
+        secure_msg,
+        bob_keys['ecc_private'],
+        alice_keys['dsa_public']
+    )
+    
+    # Results
+    print(f"Original: {message}")
+    print(f"Decrypted: {decrypted}")
+    print(f"Signature valid: {signature_valid}")
+    print(f"Test result: {'PASS' if decrypted == message and signature_valid else 'FAIL'}")
+
+if __name__ == "__main__":
+    test_complete_crypto()
