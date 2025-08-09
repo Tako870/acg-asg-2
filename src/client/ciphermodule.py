@@ -7,14 +7,14 @@ Implements secure private messaging with:
 
 """
 
-from Crypto.PublicKey import ECC, DSA     # Key generation & management
-from Crypto.Cipher import AES             # Symmetric encryption  
-from Crypto.Protocol.KDF import HKDF      # Key derivation
-from Crypto.Hash import SHA256            # Hashing for signatures
-from Crypto.Signature import DSS          # Digital signature operations
-import base64                             # Binary data encoding
-import json                               # Data structure serialization
-import time                               # Timestamps
+from Crypto.PublicKey import ECC, DSA           # Key generation & management
+from Crypto.Cipher import AES                   # Symmetric encryption  
+from Crypto.Protocol.KDF import HKDF, PBKDF2    # Key derivation
+from Crypto.Hash import SHA256                  # Hashing for signatures
+from Crypto.Signature import DSS                # Digital signature operations
+import base64                                   # Binary data encoding
+import json                                     # Data structure serialization
+import time                                     # Timestamps
 
 # ============================================================
 # Permanent ECC Key Management
@@ -74,6 +74,12 @@ def aes_decrypt(nonce, ciphertext, tag, key):
     """Decrypt message using AES-GCM."""
     cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
     return cipher.decrypt_and_verify(ciphertext, tag).decode()
+
+# ============================================================
+# Derive a 256-bit AES key from a password and salt
+# ============================================================
+def derive_key(password: str, salt: bytes, iterations: int = 200000) -> bytes:
+    return PBKDF2(password, salt, dkLen=32, count=iterations, hmac_hash_module=None)
 
 # ============================================================
 # High-Level Functions (Ephemeral ECDH per message)
