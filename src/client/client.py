@@ -5,40 +5,81 @@ import threading
 # needed for command line arguments and printing messages
 import sys
 # Import our cryptographic functions
-from ciphermodule import generate_user_keypairs, encrypt_and_sign_for_user, decrypt_and_verify_received
+from Crypto.Random import get_random_bytes
+from ciphermodule import generate_user_keypairs, encrypt_and_sign_for_user, decrypt_and_verify_received, derive_key, aes_decrypt, aes_encrypt
 # For JSON handling and file operations
 import json
 import os
-
+import base64
 # Global variables for cryptographic keys
 user_keys = None
 other_users_public_keys = {}  # username -> {'ecc_public': key, 'dsa_public': key}
 
-def load_or_generate_keys(username):
-    """Load existing keys or generate new ones for the user."""
+
+def load_or_generate_keys(username: str, password: str):
+    """
+    Load existing encrypted keys (decrypting with password) or generate new ones,
+    encrypt with password-derived key, and save to disk.
+    """
+
     global user_keys
-    
-    # Create users_keys directory if it doesn't exist
     keys_dir = "users_keys"
     os.makedirs(keys_dir, exist_ok=True)
-    
-    # Store keys in the users_keys folder
+
     keys_file = os.path.join(keys_dir, f"{username}_keys.json")
-    
+
     if os.path.exists(keys_file):
-        # Load user's existing keys
-        print(f"[*] Loading existing keys for {username}")
+        # Load and decrypt existing keys
+        print(f"[*] Loading and decrypting existing keys for {username}")
         with open(keys_file, 'r') as f:
-            user_keys = json.load(f)
+            stored = json.load(f)
+
+        # Extract and decode
+        salt = base64.b64decode(stored["salt"])
+        nonce = base64.b64decode(stored["nonce"])
+        ciphertext = base64.b64decode(stored["ciphertext"])
+        tag = base64.b64decode(stored["tag"])
+
+        # Derive same key from password & salt
+        aes_key = derive_key(password, salt)
+
+        # Decrypt JSON payload and parse
+        plaintext = aes_decrypt(nonce, ciphertext, tag, aes_key)
+        user_keys = json.loads(plaintext)
+
+        print(f"[*] Successfully decrypted keys for {username}")
     else:
-        # Generate new keys for the user
+        # Generate new keypairs (must return a JSON-serializable dict)
         print(f"[*] Generating new cryptographic keys for {username}")
         user_keys = generate_user_keypairs()
-        
-        # Save keys to file
+
+        # Serialize to JSON string
+        blob = json.dumps(user_keys)
+
+        # New random salt for KDF
+        salt = get_random_bytes(16)
+        aes_key = derive_key(password, salt)
+
+        # Encrypt JSON blob
+        nonce, ciphertext, tag = aes_encrypt(blob, aes_key)
+
+        # Store everything Base64-encoded
+        stored = {
+            "salt": base64.b64encode(salt).decode(),
+            "nonce": base64.b64encode(nonce).decode(),
+            "ciphertext": base64.b64encode(ciphertext).decode(),
+            "tag": base64.b64encode(tag).decode()
+        }
+
+        # Write to file with restricted permissions
         with open(keys_file, 'w') as f:
-            json.dump(user_keys, f, indent=2)
-        print(f"[*] Keys saved to {keys_file}")
+            json.dump(stored, f, indent=2)
+        os.chmod(keys_file, 0o600)
+
+        print(f"[*] Encrypted keys saved to {keys_file}")
+
+    return user_keys
+
 
 def send_public_keys(sock, username):
     """Send our public keys to the server for distribution."""
@@ -50,35 +91,37 @@ def send_public_keys(sock, username):
     }
     sock.sendall(json.dumps(public_key_msg).encode())
 
+
 def handle_secure_message(payload):
     """Handle incoming secure messages."""
     try:
         # Extract sender info
         sender = payload.get('sender')
         encrypted_data = payload.get('encrypted_data')
-        
+
         # Get sender's public keys
         if sender not in other_users_public_keys:
             print(f"[!] No public keys for {sender}")
             return
-        
+
         sender_dsa_pub = other_users_public_keys[sender]['dsa_public']
-        
+
         # Decrypt and verify
         message, signature_valid, timestamp = decrypt_and_verify_received(
             encrypted_data,
             user_keys['ecc_private'],
             sender_dsa_pub
         )
-        
+
         if message:
             status = "✓ VERIFIED" if signature_valid else "✗ INVALID SIGNATURE"
             print(f"\n[SECURE] {sender}: {message} [{status}]")
         else:
             print(f"\n[!] Failed to decrypt message from {sender}")
-            
+
     except Exception as e:
         print(f"\n[!] Error handling secure message: {e}")
+
 
 def handle_public_keys(payload):
     """Handle incoming public key announcements."""
@@ -94,6 +137,8 @@ def handle_public_keys(payload):
         print(f"\n[!] Error handling public keys: {e}")
 
 # Function to get messages
+
+
 def receive_messages(sock):
     # Infinite loop to receive messages from the server
     while True:
@@ -103,7 +148,7 @@ def receive_messages(sock):
             # If no message is received, break the loop
             if not msg:
                 break
-            
+
             # Try to parse as JSON (for secure messages)
             try:
                 data = json.loads(msg.decode())
@@ -131,14 +176,25 @@ def start_client(server_ip, port=12345):
     # Confirm connection
     print(f"[*] Connected to server {server_ip}:{port}")
 
-    # Prompt for username and send it to the server
-    username = input("Enter your username: ")
-    sock.sendall(username.encode())
-    
-    # Load or generate cryptographic keys
-    load_or_generate_keys(username)
-    user_keys['username'] = username  # Store username with keys
-    
+    while True:
+        # Prompt for username and send it to the server
+        username = input("Enter your username: ").strip()
+        password = input("Enter your password: ").strip()
+
+        # Load or generate cryptographic keys
+        try:
+            # Attempt to load or generate the encrypted keyfile
+            load_or_generate_keys(username, password)
+        except ValueError:
+            print("[*] Incorrect password or corrupted key file. Please try again.\n")
+            continue
+
+        # If we reach here, credentials worked
+        sock.sendall(username.encode())
+        user_keys['username'] = username
+        print(f"[*] Credentials accepted for {username}\n")
+        break
+
     # Send our public keys to the server
     send_public_keys(sock, username)
 
@@ -146,24 +202,26 @@ def start_client(server_ip, port=12345):
     # A thread is used to allow simultaneous sending and receiving of messages
     # This thread will run in the background
     # This means that the main thread can continue to accept user input
-    threading.Thread(target=receive_messages, args=(sock,), daemon=True).start()
+    threading.Thread(target=receive_messages,
+                     args=(sock,), daemon=True).start()
 
     # Main loop to send messages to the server
     # This loop will run until the user decides to quit
     print("[*] You can start sending messages. Type '/quit' to exit.")
     print("[*] Use '/secure <username> <message>' for encrypted messages.")
     print("[*] Use '/keys' to see available public keys.")
-    
+
     try:
         while True:
             msg = input("> ")
-            
+
             # Handle secure messaging command
             if msg.startswith("/secure "):
                 handle_secure_command(sock, msg, username)
             # Handle keys listing command
             elif msg.strip() == "/keys":
-                print(f"Available public keys: {list(other_users_public_keys.keys())}")
+                print(
+                    f"Available public keys: {list(other_users_public_keys.keys())}")
             # Regular message or other commands
             else:
                 sock.sendall(msg.encode())
@@ -178,6 +236,7 @@ def start_client(server_ip, port=12345):
     finally:
         sock.close()
 
+
 def handle_secure_command(sock, msg, username):
     """Handle /secure command for sending encrypted messages."""
     try:
@@ -186,15 +245,16 @@ def handle_secure_command(sock, msg, username):
         if len(parts) < 3:
             print("Usage: /secure <recipient> <message>")
             return
-        
+
         recipient = parts[1]
         message = parts[2]
-        
+
         # Check if we have recipient's public keys
         if recipient not in other_users_public_keys:
-            print(f"No public keys available for {recipient}. They may not be online.")
+            print(
+                f"No public keys available for {recipient}. They may not be online.")
             return
-        
+
         # Encrypt and sign the message
         recipient_ecc_pub = other_users_public_keys[recipient]['ecc_public']
         encrypted_package = encrypt_and_sign_for_user(
@@ -210,12 +270,13 @@ def handle_secure_command(sock, msg, username):
             'recipient': recipient,
             'encrypted_data': encrypted_package
         }
-        
+
         sock.sendall(json.dumps(secure_msg).encode())
         print(f"[*] Secure message sent to {recipient}")
-        
+
     except Exception as e:
         print(f"[!] Error sending secure message: {e}")
+
 
 if __name__ == "__main__":
     # Usage: python3 src/client/client.py <server-domain-or-ip>
