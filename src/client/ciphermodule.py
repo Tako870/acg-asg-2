@@ -78,8 +78,8 @@ def aes_decrypt(nonce, ciphertext, tag, key):
 # ============================================================
 # Derive a 256-bit AES key from a password and salt
 # ============================================================
-def derive_key(password: str, salt: bytes, iterations: int = 200000) -> bytes:
-    return PBKDF2(password, salt, dkLen=32, count=iterations, hmac_hash_module=None)
+def derive_key(password: str, salt: bytes, iterations: int = 1000000) -> bytes:
+    return PBKDF2(password, salt, dkLen=32, count=iterations, hmac_hash_module=SHA256)
 
 # ============================================================
 # High-Level Functions (Ephemeral ECDH per message)
