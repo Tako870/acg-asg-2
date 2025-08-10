@@ -24,12 +24,6 @@ This is done as follows:
 
 As a recipient, you will then get a message labeled **[PRIVATE]** if you are logged in when this happens.
 
-You can view any private messages sent to you through:
-
-```bash
-/inbox
-```
-
 This will give you a list of private messages you have received.
 
 To quit:
