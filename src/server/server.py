@@ -13,7 +13,11 @@ def handle_client(conn, addr):
     try:
         # Receive username from the client
         username = conn.recv(1024).decode().strip()
-        
+        if username in user_sockets:
+            conn.send(json.dumps({"status": "error", "message": "Username already taken"}).encode())
+            conn.close()
+            return
+        conn.send(json.dumps({"status": "success", "message": "Connected successfully"}).encode())
         # Save connection and initialize inbox
         user_sockets[username] = conn
         inboxes[username] = []

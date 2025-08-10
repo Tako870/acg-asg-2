@@ -191,6 +191,20 @@ def start_client(server_ip, port=12345):
 
         # If we reach here, credentials worked
         sock.sendall(username.encode())
+        # Wait for server response
+        response = sock.recv(1024).decode().strip()
+
+        try:
+            data = json.loads(response)
+            if data.get("status") == "error":
+                print(f"[!] Server error: {data.get('message')}")
+                sock.close()
+                return  # Exit the function or retry loop
+        except json.JSONDecodeError:
+            # If it's not JSON, assume it's a regular message
+            print("[!] Unexpected response from server.")
+            sock.close()
+            return
         user_keys['username'] = username
         print(f"[*] Credentials accepted for {username}\n")
         break
